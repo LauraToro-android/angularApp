@@ -16,44 +16,61 @@ const loadFromLocalStorage = () => {
     return gifs;
 }
 
-@Injectable({providedIn: 'root'})
+@Injectable({ providedIn: 'root' })
 export class GifService {
 
     private http = inject(HttpClient);
 
+    // 🟣 Trending
     trendingGifs = signal<Gif[]>([]);
     trendingGifsLoading = signal(false);
     private trendingPage = signal(0);
 
-    //[[gif, gif, gif],[gif, gif, gif],[gif, gif, gif]]
-    // Un array dentro de otro array para agrupar y ordenar y crear grupos de tres en tres
-    trendingGifGroup = computed<Gif[][]>(() =>{
+    trendingGifGroup = computed<Gif[][]>(() => {
         const groups = [];
-        for( let i = 0;i < this.trendingGifs().length; i+=3){
-            groups.push(this.trendingGifs().slice(i, i +3));
+        for (let i = 0; i < this.trendingGifs().length; i += 3) {
+            groups.push(this.trendingGifs().slice(i, i + 3));
         }
-        console.log(groups);
         return groups;
-    })
+    });
 
+    // 🔍 Historial
     searchHistory = signal<Record<string, Gif[]>>(loadFromLocalStorage());
-    searchHistoryKeys = computed(() => Object.keys(this.searchHistory()))
+    searchHistoryKeys = computed(() => Object.keys(this.searchHistory()));
+
+    // ✅ NUEVO: Scroll infinito de búsqueda
+    private searchQuery = signal('');
+    private searchPage = signal(0);
+    private searchResults = signal<Gif[]>([]);
+    private searchLoading = signal(false);
+
+    // Agrupado de resultados de búsqueda
+    searchGifGroup = computed<Gif[][]>(() => {
+        const groups: Gif[][] = [];
+        const gifs = this.searchResults();
+        for (let i = 0; i < gifs.length; i += 3) {
+            groups.push(gifs.slice(i, i + 3));
+        }
+        return groups;
+    });
+
+    isSearching = computed(() => this.searchQuery().trim().length > 0);
+    searchLoadingState = computed(() => this.searchLoading());
 
     constructor() {
         this.loadTrendingGifs();
-        console.log('Servcio creado');
+        console.log('Servicio creado');
+
+        // Guardar historial en localStorage
+        effect(() => {
+            const historyString = JSON.stringify(this.searchHistory());
+            localStorage.setItem(GIF_KEY, historyString);
+        });
     }
 
-    saveGifsToLocalStorage = effect(() => {
-        const historiString = JSON.stringify(this.searchHistory());
-        localStorage.setItem('gifs', historiString);
+    loadTrendingGifs() {
+        if (this.trendingGifsLoading()) return;
 
-    })
-
-    loadTrendingGifs(){
-        // Evitar el bonbardeo de las peticiones que estan creadas.
-        if (this.trendingGifsLoading()) return; 
-        //si no esta utilizando esta función la activamos otra vez para que la pagina siga 
         this.trendingGifsLoading.set(true);
 
         this.http.get<GiphyResponse>(`${environment.giphyUrl}/gifs/trending`, {
@@ -61,7 +78,6 @@ export class GifService {
                 api_key: environment.apiKey,
                 limit: 20,
                 offset: this.trendingPage() * 20,
-
             },
         }).subscribe((resp) => {
             const gifs = GifMapper.mapGiphyItemsToGifArray(resp.data);
@@ -69,40 +85,65 @@ export class GifService {
                 ...currentGifs,
                 ...gifs,
             ]);
-            this.trendingPage.update((page) => page +1);//Pagina infinita lista infinita
+            this.trendingPage.update((page) => page + 1);
             this.trendingGifsLoading.set(false);
-            console.log({gifs});
         });
     }
 
-    searchGifs(query: string): Observable<Gif[]>{
+    searchGifs(query: string): Observable<Gif[]> {
+        // ✅ Nueva búsqueda
+        this.searchQuery.set(query);
+        this.searchPage.set(1); // Página 1, la siguiente será 2
+        this.searchLoading.set(true);
+
         return this.http.get<GiphyResponse>(`${environment.giphyUrl}/gifs/search`, {
             params: {
                 api_key: environment.apiKey,
                 limit: 20,
                 q: query,
-
+                offset: 0
             },
         }).pipe(
-            map(({data}) => data),
-            map((items) => GifMapper.mapGiphyItemsToGifArray(items)),
-
+            map(({ data }) => GifMapper.mapGiphyItemsToGifArray(data)),
             tap(items => {
-                this.searchHistory.update( history => ({
+                this.searchResults.set(items);
+                this.searchHistory.update(history => ({
                     ...history,
                     [query.toLowerCase()]: items,
                 }));
+                this.searchLoading.set(false);
             })
-
-        )
-        //.subscribe((resp) => {
-        //    const gifs = GifMapper.mapGiphyItemsToGifArray(resp.data);
-            //console.log({search: gifs});
-        //});
-
+        );
     }
-    getHistoryGifs(query: string): Gif[] {
-        return this.searchHistory()[query]?? [];
 
+    // ✅ NUEVO: Scroll infinito en búsqueda
+    loadMoreSearchResults() {
+        if (this.searchLoading()) return;
+        const query = this.searchQuery();
+        if (!query) return;
+
+        this.searchLoading.set(true);
+
+        const offset = this.searchPage() * 20;
+
+        this.http.get<GiphyResponse>(`${environment.giphyUrl}/gifs/search`, {
+            params: {
+                api_key: environment.apiKey,
+                limit: 20,
+                q: query,
+                offset: offset
+            }
+        }).pipe(
+            map(resp => GifMapper.mapGiphyItemsToGifArray(resp.data)),
+            tap(newGifs => {
+                this.searchResults.update(current => [...current, ...newGifs]);
+                this.searchPage.update(page => page + 1);
+                this.searchLoading.set(false);
+            })
+        ).subscribe();
+    }
+
+    getHistoryGifs(query: string): Gif[] {
+        return this.searchHistory()[query.toLowerCase()] ?? [];
     }
 }
